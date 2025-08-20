@@ -19,6 +19,8 @@ Optional compression (gz).
 
 Flexible control of headers, BOM.
 
+For formatted DATE, NUMBER, TIMESTAMP types use ALTER SESSION SET NLS_...
+
 
 
 ## Examples
