@@ -1,4 +1,4 @@
-create or replace package sha3.EXPIMP is
+create or replace package EXPIMP is
 
   ---------------- Examples set format for export2csv -------------------
   --ALTER SESSION SET NLS_DATE_FORMAT = 'DD.MM.YYYY HH24:MI:SS';
@@ -44,7 +44,8 @@ create or replace package sha3.EXPIMP is
 
 end EXPIMP;
 /
-create or replace package body sha3.EXPIMP is 
+
+create or replace package body EXPIMP is 
 
   --------------------- PRIVATE -------------------------
  
@@ -489,3 +490,4 @@ create or replace package body sha3.EXPIMP is
 
 end EXPIMP;
 /
+
