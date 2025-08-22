@@ -1,6 +1,6 @@
-## Oracle PL/SQL package for export data to CSV file
+## Oracle PL/SQL package for export data to CSV/XLS file
 
-A PL/SQL package for exporting query results to CSV files (written to an Oracle DIRECTORY) or to a BLOB variable.
+A PL/SQL package for exporting query results to files (written to an Oracle DIRECTORY) or to a BLOB variable in format CSV or XLS (XML Table 2003).
 Output encoding is UTF-8 (optionally with BOM). Full support for national character sets.
 
 
@@ -19,7 +19,9 @@ Optional compression (gz).
 
 Flexible control of headers, BOM.
 
-For formatted DATE, NUMBER, TIMESTAMP types use ALTER SESSION SET NLS_...
+For formatted DATE, NUMBER, TIMESTAMP types in CSV use ALTER SESSION SET NLS_...
+
+If exceeded Excel limits - size of cells or count of rows - raise exception.
 
 
 
@@ -27,20 +29,24 @@ For formatted DATE, NUMBER, TIMESTAMP types use ALTER SESSION SET NLS_...
 
 ```SQL
 begin 
-  expimp.export2csv('select * from all_tables', 'EXPORT_DIR', 'all_tables.csv'); 
+  export.export2csv('select * from all_tables', 'EXPORT_DIR', 'all_tables.csv'); 
+end;
+
+begin 
+  export.export2xls('select * from all_tables', 'EXPORT_DIR', 'all_tables.xls'); 
 end;
 
 declare
   c sys_refcursor; 
 begin
   open c for select * from all_tables; 
-  expimp.export2csv(c, 'EXPORT_DIR', 'all_tables.csv', p_compress => true);
+  export.export2xls(c, 'EXPORT_DIR', 'all_tables.xls', p_compress => true);
 end;
 
 declare
   p_outblob blob;
 begin 
-  expimp.export2csv('select * from all_tables', p_outblob, p_header => false, p_bom => false, p_compress => false); 
+  export.export2csv('select * from all_tables', p_outblob, p_header => false, p_bom => false, p_compress => false); 
 end;
 ```
 
@@ -50,7 +56,7 @@ end;
 
 ```SQL
 --sql
-@EXPIMP.pck
+@EXPORT.pck
 ```
 
 
