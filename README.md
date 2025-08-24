@@ -1,6 +1,6 @@
-## Oracle PL/SQL package for export data to CSV/XLS file
+## Oracle PL/SQL package for export data to CSV/XLS/JSON file
 
-A PL/SQL package for exporting query results to files (written to an Oracle DIRECTORY) or to a BLOB variable in format CSV or XLS (XML Table 2003).
+A PL/SQL package for exporting query results to files (written to an Oracle DIRECTORY) or to a BLOB variable in format CSV, XLS (XML Table 2003) or JSON.
 Output encoding is UTF-8 (optionally with BOM). Full support for national character sets.
 
 
@@ -23,6 +23,8 @@ For formatted DATE, NUMBER, TIMESTAMP types in CSV use ALTER SESSION SET NLS_...
 
 If exceeded Excel limits - size of cells or count of rows - raise exception.
 
+Binary data export as hex strings
+
 
 
 ## Examples
@@ -34,6 +36,10 @@ end;
 
 begin 
   export.export2xls('select * from all_tables', 'EXPORT_DIR', 'all_tables.xls'); 
+end;
+
+begin 
+  export.export2json('select * from all_tables', 'EXPORT_DIR', 'all_tables.json', p_compress => true); 
 end;
 
 declare
