@@ -60,9 +60,31 @@ create or replace package EXPORT is
                        p_outlob    out blob,  
                        p_compress  boolean default false);
 
+  procedure export2json(p_query    clob,
+                        p_dir      varchar2,
+                        p_file     varchar2, 
+                        p_bom      boolean default true,
+                        p_compress boolean default false); 
+ 
+  procedure export2json(p_refcursor in out sys_refcursor,
+                        p_dir       varchar2,
+                        p_file      varchar2, 
+                        p_bom       boolean default true,
+                        p_compress  boolean default false); 
+  
+  procedure export2json(p_query    clob,
+                        p_outlob   out blob,  
+                        p_bom      boolean default true,
+                        p_compress boolean default false); 
+
+  procedure export2json(p_refcursor in out sys_refcursor,
+                        p_outlob    out blob,  
+                        p_bom       boolean default true,
+                        p_compress  boolean default false); 
+
 end EXPORT;
 /
-
+0
 create or replace package body EXPORT is
 
   --------------------- PRIVATE -------------------------
@@ -97,8 +119,8 @@ create or replace package body EXPORT is
       p_src_offset   pls_integer;
       p_warning      pls_integer; 
       p_lang_context pls_integer := dbms_lob.default_lang_ctx;
-    begin 
-      p_data := '"' || replace(p_data, '"', '""') || '"'; 
+    begin    
+      p_data := '"' || replace(p_data, '"', '""') || '"';  
           
       if (i < p_col_count) then
         p_data := p_data || ';';  
@@ -1135,6 +1157,488 @@ create or replace package body EXPORT is
       p_outlob := utl_compress.lz_compress(p_outlob); 
     end if; 
   end export2xls; 
+  
+  procedure export2json(p_cursor   in out integer,
+                        p_dir      varchar2,
+                        p_file     varchar2, 
+                        p_bom      boolean,
+                        p_compress boolean) 
+  as 
+    p_col_count number;
+    p_desc_tab  dbms_sql.desc_tab; 
+    p_number    number;
+    p_string    varchar2(32767);  
+    p_clob      clob; 
+    p_blob      blob;
+    p_nclob     nclob; 
+    p_tclob     nclob;
+    p_tmpblob   blob;
+    p_tmpclob   clob;
+    p_timestamp timestamp;
+    p_cnt       number;   
+    i           pls_integer := 0;
+    j           pls_integer := 0;
+    p_length    pls_integer; 
+    p_lbracket  raw(1) := utl_i18n.string_to_raw('{', 'AL32UTF8'); 
+    p_rbracket  raw(1) := utl_i18n.string_to_raw('}', 'AL32UTF8'); 
+    p_coma      raw(1) := utl_i18n.string_to_raw(',', 'AL32UTF8');   
+    p_file_ptr  utl_file.file_type := utl_file.fopen(p_dir, p_file, 'wb'); 
+    p_bfile     bfile := bfilename(p_dir, p_file);
+    p_start     boolean := true;
+    p_tmp_c     sys_refcursor;
+    
+    procedure write_clob(p_data     in out nocopy clob character set any_cs,
+                         p_is_nchar boolean,
+                         p_index    pls_integer)
+    as 
+      p_dest_offset  pls_integer := 1;
+      p_src_offset   pls_integer := 1;
+      p_warning      pls_integer; 
+      p_lang_context pls_integer := dbms_lob.default_lang_ctx;
+    begin   
+      if p_is_nchar then
+        p_tclob := p_data;
+        j := 0;
+        p_length := dbms_lob.getlength(p_tclob);
+        dbms_lob.trim(p_tmpclob, 0);
+              
+        while (j < p_length) loop 
+          p_tmpclob := p_tmpclob || asciistr(substr(p_tclob, j + 1, least(p_length - j, 4000)));  
+          j := j + 4000;
+        end loop; 
+          
+        p_string := 'select replace(JSON_OBJECT(asciistr(:1) value :2 returning clob), ''\\'', ''\u'') from dual';
+        open p_tmp_c for p_string using p_desc_tab(p_index).col_name, p_tmpclob;
+        fetch p_tmp_c into p_tmpclob;  
+      else
+        p_string := 'select JSON_OBJECT(:1 value :2 returning clob) from dual';
+        open p_tmp_c for p_string using p_desc_tab(p_index).col_name, p_data;
+        fetch p_tmp_c into p_tmpclob;     
+      end if; 
+               
+      dbms_lob.trim(p_tmpblob, 0);
+            
+      dbms_lob.convertToBlob(dest_lob     => p_tmpblob,
+                             src_clob     => substr(p_tmpclob, 2, length(p_tmpclob) - 2),
+                             amount       => dbms_lob.lobmaxsize,
+                             dest_offset  => p_dest_offset,
+                             src_offset   => p_src_offset,
+                             blob_csid    => nls_charset_id('AL32UTF8'),
+                             lang_context => p_lang_context,
+                             warning      => p_warning);
+              
+      j := 0;
+      p_length := dbms_lob.getlength(p_tmpblob);
+            
+      while (j < p_length) loop 
+        utl_file.put_raw(p_file_ptr, dbms_lob.substr(p_tmpblob, least(p_length - j, 32767), j + 1));
+        j := j + 32767;
+      end loop; 
+    end write_clob;
+  begin    
+    dbms_lob.createtemporary(p_tmpblob, true);  
+    dbms_lob.createtemporary(p_tmpclob, true);   
+    
+    if p_bom then
+      utl_file.put_raw(p_file_ptr, 'EFBBBF');
+    end if; 
+    
+    utl_file.put_raw(p_file_ptr, utl_i18n.string_to_raw('[', 'AL32UTF8'));
+    
+    dbms_sql.describe_columns(p_cursor, p_col_count, p_desc_tab);   
+    
+    for i in 1..p_col_count loop  
+      if (p_desc_tab(i).col_type in (1, 2, 8, 12, 100, 101, 180, 181, 231, 182, 183, 23, 69, 208, 96, 112, 113)) then
+        if (p_desc_tab(i).col_charsetform = 2) then
+          dbms_sql.define_column(p_cursor, i, p_nclob);  
+        else
+          if (p_desc_tab(i).col_type = 112) then  
+            dbms_sql.define_column(p_cursor, i, p_clob);  
+          elsif (p_desc_tab(i).col_type in (2, 100, 101)) then 
+            dbms_sql.define_column(p_cursor, i, p_number);  
+          elsif (p_desc_tab(i).col_type in (12, 180, 231)) then 
+            dbms_sql.define_column(p_cursor, i, p_timestamp);   
+          elsif (p_desc_tab(i).col_type in (23, 113)) then 
+            dbms_sql.define_column(p_cursor, i, p_blob);  
+          elsif (p_desc_tab(i).col_type = 8) then 
+            dbms_sql.define_column_long(p_cursor, i);  
+          else
+            dbms_sql.define_column(p_cursor, i, p_string, 32767);  
+          end if;  
+        end if;
+      end if; 
+    end loop; 
+    
+    loop
+      exit when dbms_sql.fetch_rows(p_cursor) = 0;  
+      
+      if not p_start then
+        utl_file.put_raw(p_file_ptr, p_coma); 
+      else
+        p_start := false;
+      end if;
+      
+      utl_file.put_raw(p_file_ptr, p_lbracket);
+    
+      for i in 1..p_col_count loop 
+        if (p_desc_tab(i).col_type in (1, 2, 8, 12, 100, 101, 180, 181, 231, 182, 183, 23, 69, 208, 96, 112, 113)) then
+          if (p_desc_tab(i).col_charsetform = 2) then  
+            dbms_sql.column_value(p_cursor, i, p_nclob);
+            
+            p_length := nvl(dbms_lob.getlength(p_nclob), 0); 
+            
+            if p_length > 0 then
+              PRAGMA INLINE (write_clob, 'YES');
+              write_clob(p_nclob, true, i); 
+            else 
+              p_string := json_object(p_desc_tab(i).col_name value null);   
+              utl_file.put_raw(p_file_ptr, utl_i18n.string_to_raw(substr(p_string, 2, length(p_string) - 2), 'AL32UTF8'));  
+            end if;   
+          else
+            if (p_desc_tab(i).col_type = 112) then  
+              dbms_sql.column_value(p_cursor, i, p_clob);  
+              
+              if dbms_lob.getlength(p_clob) > 0 then
+                PRAGMA INLINE (write_clob, 'YES');
+                write_clob(p_clob, false, i); 
+              else 
+                p_string := json_object(p_desc_tab(i).col_name value null);   
+                utl_file.put_raw(p_file_ptr, utl_i18n.string_to_raw(substr(p_string, 2, length(p_string) - 2), 'AL32UTF8'));    
+              end if;  
+            elsif (p_desc_tab(i).col_type in (2, 100, 101)) then 
+              dbms_sql.column_value(p_cursor, i, p_number);   
+              p_string := json_object(p_desc_tab(i).col_name value p_number);   
+              utl_file.put_raw(p_file_ptr, utl_i18n.string_to_raw(substr(p_string, 2, length(p_string) - 2), 'AL32UTF8'));    
+            elsif (p_desc_tab(i).col_type in (12, 180, 231)) then 
+              dbms_sql.column_value(p_cursor, i, p_timestamp);     
+              p_string := json_object(p_desc_tab(i).col_name value p_timestamp);   
+              utl_file.put_raw(p_file_ptr, utl_i18n.string_to_raw(substr(p_string, 2, length(p_string) - 2), 'AL32UTF8'));  
+            elsif (p_desc_tab(i).col_type = 8) then  
+              p_cnt := 0;
+              dbms_lob.trim(p_tmpclob, 0);
+              dbms_sql.column_value_long(p_cursor, i, 32767, p_cnt, p_string, p_length); 
+            
+              while (p_length > 0) loop  
+                p_tmpclob := p_tmpclob || p_string;  
+                p_cnt := p_cnt + p_length;
+                dbms_sql.column_value_long(p_cursor, i, 32767, p_cnt, p_string, p_length); 
+              end loop; 
+              
+              if p_cnt > 0 then
+                PRAGMA INLINE (write_clob, 'YES');
+                write_clob(p_tmpclob, false, i); 
+              else 
+                p_string := json_object(p_desc_tab(i).col_name value null);   
+                utl_file.put_raw(p_file_ptr, utl_i18n.string_to_raw(substr(p_string, 2, length(p_string) - 2), 'AL32UTF8'));   
+              end if; 
+            elsif (p_desc_tab(i).col_type in (23, 113)) then 
+              dbms_sql.column_value(p_cursor, i, p_blob);   
+                 
+              p_length := nvl(dbms_lob.getlength(p_blob), 0); 
+              
+              j := 0; 
+              dbms_lob.trim(p_tmpclob, 0);
+              
+              while (j < p_length) loop 
+                p_tmpclob := p_tmpclob || rawtohex(dbms_lob.substr(p_blob, least(p_length - j, 32767), j + 1)); 
+                j := j + 32767;
+              end loop; 
+              
+              if p_length > 0 then
+                PRAGMA INLINE (write_clob, 'YES');
+                write_clob(p_tmpclob, false, i); 
+              else 
+                p_string := json_object(p_desc_tab(i).col_name value null);   
+                utl_file.put_raw(p_file_ptr, utl_i18n.string_to_raw(substr(p_string, 2, length(p_string) - 2), 'AL32UTF8'));   
+              end if;  
+            else
+              dbms_sql.column_value(p_cursor, i, p_string); 
+              p_length := nvl(length(p_string), 0);   
+              
+              if (p_length > 16000) then 
+                dbms_lob.trim(p_tmpclob, 0);
+                dbms_lob.writeappend(p_tmpclob, 1, p_string); 
+                PRAGMA INLINE (write_clob, 'YES');
+                write_clob(p_tmpclob, false, i); 
+              else 
+                p_string := json_object(p_desc_tab(i).col_name value p_string);   
+                utl_file.put_raw(p_file_ptr, utl_i18n.string_to_raw(substr(p_string, 2, length(p_string) - 2), 'AL32UTF8'));
+              end if;
+            end if;  
+          end if; 
+        else
+          p_string := json_object(p_desc_tab(i).col_name value '<Unsupported type>');   
+          utl_file.put_raw(p_file_ptr, utl_i18n.string_to_raw(substr(p_string, 2, length(p_string) - 2), 'AL32UTF8'));  
+        end if;   
+      
+        if (i < p_col_count) then
+          utl_file.put_raw(p_file_ptr, p_coma);  
+        end if;
+      end loop;  
+          
+      utl_file.put_raw(p_file_ptr, p_rbracket); 
+    end loop; 
+    
+    utl_file.put_raw(p_file_ptr, utl_i18n.string_to_raw(']', 'AL32UTF8'));
+     
+    dbms_sql.close_cursor(p_cursor);  
+    utl_file.fclose(p_file_ptr);    
+    
+    if p_compress then 
+      dbms_lob.open(p_bfile); 
+      dbms_lob.loadfromfile(p_tmpblob, p_bfile, dbms_lob.lobmaxsize);  
+      p_tmpblob := utl_compress.lz_compress(p_tmpblob); 
+      dbms_lob.close(p_bfile);  
+      
+      p_file_ptr := utl_file.fopen(p_dir, p_file, 'wb');
+      
+      j := 0;
+      p_length := dbms_lob.getlength(p_tmpblob);
+            
+      while (j < p_length) loop 
+        utl_file.put_raw(p_file_ptr, dbms_lob.substr(p_tmpblob, least(p_length - j, 32767), j + 1));
+        j := j + 32767;
+      end loop; 
+        
+      utl_file.fclose(p_file_ptr);   
+    end if; 
+    
+    dbms_lob.freetemporary(p_tmpblob); 
+    dbms_lob.freetemporary(p_tmpclob);    
+  end export2json;
+
+  procedure export2json(p_cursor   in out integer,
+                        p_outlob   in out blob, 
+                        p_bom      boolean,
+                        p_compress boolean) 
+  as 
+    p_col_count number;
+    p_desc_tab  dbms_sql.desc_tab; 
+    p_raw       raw(32767);
+    p_number    number;
+    p_string    varchar2(32767);  
+    p_clob      clob; 
+    p_blob      blob;
+    p_nclob     nclob; 
+    p_tclob     nclob;
+    p_tmpblob   blob;
+    p_tmpclob   clob;
+    p_timestamp timestamp;
+    p_cnt       number;   
+    i           pls_integer := 0;
+    j           pls_integer := 0;
+    p_length    pls_integer; 
+    p_lbracket  raw(1) := utl_i18n.string_to_raw('{', 'AL32UTF8'); 
+    p_rbracket  raw(1) := utl_i18n.string_to_raw('}', 'AL32UTF8'); 
+    p_coma      raw(1) := utl_i18n.string_to_raw(',', 'AL32UTF8');    
+    p_start     boolean := true;
+    p_tmp_c     sys_refcursor;
+    
+    procedure write_clob(p_data     in out nocopy clob character set any_cs,
+                         p_is_nchar boolean,
+                         p_index    pls_integer)
+    as 
+      p_dest_offset  pls_integer := 1;
+      p_src_offset   pls_integer := 1;
+      p_warning      pls_integer; 
+      p_lang_context pls_integer := dbms_lob.default_lang_ctx;
+    begin   
+      if p_is_nchar then
+        p_tclob := p_data;
+        j := 0;
+        p_length := dbms_lob.getlength(p_tclob);
+        dbms_lob.trim(p_tmpclob, 0);
+              
+        while (j < p_length) loop 
+          p_tmpclob := p_tmpclob || asciistr(substr(p_tclob, j + 1, least(p_length - j, 4000)));  
+          j := j + 4000;
+        end loop; 
+          
+        p_string := 'select replace(JSON_OBJECT(asciistr(:1) value :2 returning clob), ''\\'', ''\u'') from dual';
+        open p_tmp_c for p_string using p_desc_tab(p_index).col_name, p_tmpclob;
+        fetch p_tmp_c into p_tmpclob;  
+      else
+        p_string := 'select JSON_OBJECT(:1 value :2 returning clob) from dual';
+        open p_tmp_c for p_string using p_desc_tab(p_index).col_name, p_data;
+        fetch p_tmp_c into p_tmpclob;     
+      end if; 
+               
+      dbms_lob.trim(p_tmpblob, 0);
+            
+      dbms_lob.convertToBlob(dest_lob     => p_tmpblob,
+                             src_clob     => substr(p_tmpclob, 2, length(p_tmpclob) - 2),
+                             amount       => dbms_lob.lobmaxsize,
+                             dest_offset  => p_dest_offset,
+                             src_offset   => p_src_offset,
+                             blob_csid    => nls_charset_id('AL32UTF8'),
+                             lang_context => p_lang_context,
+                             warning      => p_warning);
+              
+      dbms_lob.append(p_outlob, p_tmpblob);
+    end write_clob;
+  begin    
+    dbms_lob.createtemporary(p_tmpblob, true);  
+    dbms_lob.createtemporary(p_tmpclob, true);   
+    
+    if p_bom then
+      dbms_lob.writeappend(p_outlob, 3, 'EFBBBF'); 
+    end if; 
+    
+    dbms_lob.writeappend(p_outlob, 1, utl_i18n.string_to_raw('[', 'AL32UTF8'));  
+    
+    dbms_sql.describe_columns(p_cursor, p_col_count, p_desc_tab);   
+    
+    for i in 1..p_col_count loop  
+      if (p_desc_tab(i).col_type in (1, 2, 8, 12, 100, 101, 180, 181, 231, 182, 183, 23, 69, 208, 96, 112, 113)) then
+        if (p_desc_tab(i).col_charsetform = 2) then
+          dbms_sql.define_column(p_cursor, i, p_nclob);  
+        else
+          if (p_desc_tab(i).col_type = 112) then  
+            dbms_sql.define_column(p_cursor, i, p_clob);  
+          elsif (p_desc_tab(i).col_type in (2, 100, 101)) then 
+            dbms_sql.define_column(p_cursor, i, p_number);  
+          elsif (p_desc_tab(i).col_type in (12, 180, 231)) then 
+            dbms_sql.define_column(p_cursor, i, p_timestamp);   
+          elsif (p_desc_tab(i).col_type in (23, 113)) then 
+            dbms_sql.define_column(p_cursor, i, p_blob);  
+          elsif (p_desc_tab(i).col_type = 8) then 
+            dbms_sql.define_column_long(p_cursor, i);  
+          else
+            dbms_sql.define_column(p_cursor, i, p_string, 32767);  
+          end if;  
+        end if;
+      end if; 
+    end loop; 
+    
+    loop
+      exit when dbms_sql.fetch_rows(p_cursor) = 0;  
+      
+      if not p_start then
+        dbms_lob.writeappend(p_outlob, 1, p_coma);   
+      else
+        p_start := false;
+      end if;
+       
+      dbms_lob.writeappend(p_outlob, 1, p_lbracket);   
+    
+      for i in 1..p_col_count loop 
+        if (p_desc_tab(i).col_type in (1, 2, 8, 12, 100, 101, 180, 181, 231, 182, 183, 23, 69, 208, 96, 112, 113)) then
+          if (p_desc_tab(i).col_charsetform = 2) then  
+            dbms_sql.column_value(p_cursor, i, p_nclob);
+            
+            p_length := nvl(dbms_lob.getlength(p_nclob), 0); 
+            
+            if p_length > 0 then
+              PRAGMA INLINE (write_clob, 'YES');
+              write_clob(p_nclob, true, i); 
+            else  
+              p_string := json_object(p_desc_tab(i).col_name value null);   
+              p_raw := utl_i18n.string_to_raw(substr(p_string, 2, length(p_string) - 2), 'AL32UTF8');
+              dbms_lob.writeappend(p_outlob, utl_raw.length(p_raw), p_raw);  
+            end if;   
+          else
+            if (p_desc_tab(i).col_type = 112) then  
+              dbms_sql.column_value(p_cursor, i, p_clob);  
+              
+              if dbms_lob.getlength(p_clob) > 0 then
+                PRAGMA INLINE (write_clob, 'YES');
+                write_clob(p_clob, false, i); 
+              else 
+                p_string := json_object(p_desc_tab(i).col_name value null);   
+                p_raw := utl_i18n.string_to_raw(substr(p_string, 2, length(p_string) - 2), 'AL32UTF8');
+                dbms_lob.writeappend(p_outlob, utl_raw.length(p_raw), p_raw);     
+              end if;  
+            elsif (p_desc_tab(i).col_type in (2, 100, 101)) then 
+              dbms_sql.column_value(p_cursor, i, p_number);   
+              p_string := json_object(p_desc_tab(i).col_name value p_number);   
+              p_raw := utl_i18n.string_to_raw(substr(p_string, 2, length(p_string) - 2), 'AL32UTF8');
+              dbms_lob.writeappend(p_outlob, utl_raw.length(p_raw), p_raw);   
+            elsif (p_desc_tab(i).col_type in (12, 180, 231)) then 
+              dbms_sql.column_value(p_cursor, i, p_timestamp);     
+              p_string := json_object(p_desc_tab(i).col_name value p_timestamp);      
+              p_raw := utl_i18n.string_to_raw(substr(p_string, 2, length(p_string) - 2), 'AL32UTF8');
+              dbms_lob.writeappend(p_outlob, utl_raw.length(p_raw), p_raw);     
+            elsif (p_desc_tab(i).col_type = 8) then  
+              p_cnt := 0;
+              dbms_lob.trim(p_tmpclob, 0);
+              dbms_sql.column_value_long(p_cursor, i, 32767, p_cnt, p_string, p_length); 
+            
+              while (p_length > 0) loop  
+                p_tmpclob := p_tmpclob || p_string;  
+                p_cnt := p_cnt + p_length;
+                dbms_sql.column_value_long(p_cursor, i, 32767, p_cnt, p_string, p_length); 
+              end loop; 
+              
+              if p_cnt > 0 then
+                PRAGMA INLINE (write_clob, 'YES');
+                write_clob(p_tmpclob, false, i); 
+              else 
+                p_string := json_object(p_desc_tab(i).col_name value null);      
+                p_raw := utl_i18n.string_to_raw(substr(p_string, 2, length(p_string) - 2), 'AL32UTF8');
+                dbms_lob.writeappend(p_outlob, utl_raw.length(p_raw), p_raw);    
+              end if; 
+            elsif (p_desc_tab(i).col_type in (23, 113)) then 
+              dbms_sql.column_value(p_cursor, i, p_blob);   
+                 
+              p_length := nvl(dbms_lob.getlength(p_blob), 0); 
+              
+              j := 0; 
+              dbms_lob.trim(p_tmpclob, 0);
+              
+              while (j < p_length) loop 
+                p_tmpclob := p_tmpclob || rawtohex(dbms_lob.substr(p_blob, least(p_length - j, 32767), j + 1)); 
+                j := j + 32767;
+              end loop; 
+              
+              if p_length > 0 then
+                PRAGMA INLINE (write_clob, 'YES');
+                write_clob(p_tmpclob, false, i); 
+              else 
+                p_string := json_object(p_desc_tab(i).col_name value null);    
+                p_raw := utl_i18n.string_to_raw(substr(p_string, 2, length(p_string) - 2), 'AL32UTF8');
+                dbms_lob.writeappend(p_outlob, utl_raw.length(p_raw), p_raw);       
+              end if;  
+            else
+              dbms_sql.column_value(p_cursor, i, p_string); 
+              p_length := nvl(length(p_string), 0);   
+              
+              if (p_length > 16000) then 
+                dbms_lob.trim(p_tmpclob, 0);
+                dbms_lob.writeappend(p_tmpclob, 1, p_string); 
+                PRAGMA INLINE (write_clob, 'YES');
+                write_clob(p_tmpclob, false, i); 
+              else 
+                p_string := json_object(p_desc_tab(i).col_name value p_string);      
+                p_raw := utl_i18n.string_to_raw(substr(p_string, 2, length(p_string) - 2), 'AL32UTF8');
+                dbms_lob.writeappend(p_outlob, utl_raw.length(p_raw), p_raw);    
+              end if;
+            end if;  
+          end if; 
+        else
+          p_string := json_object(p_desc_tab(i).col_name value '<Unsupported type>');      
+          p_raw := utl_i18n.string_to_raw(substr(p_string, 2, length(p_string) - 2), 'AL32UTF8');
+          dbms_lob.writeappend(p_outlob, utl_raw.length(p_raw), p_raw);    
+        end if;   
+      
+        if (i < p_col_count) then    
+          dbms_lob.writeappend(p_outlob, 1, p_coma);   
+        end if;
+      end loop;  
+            
+      dbms_lob.writeappend(p_outlob, 1, p_rbracket); 
+    end loop; 
+    
+    dbms_lob.writeappend(p_outlob, 1, utl_i18n.string_to_raw(']', 'AL32UTF8'));  
+     
+    dbms_sql.close_cursor(p_cursor);   
+    
+    if p_compress then 
+       p_outlob := utl_compress.lz_compress(p_outlob);   
+    end if; 
+    
+    dbms_lob.freetemporary(p_tmpblob); 
+    dbms_lob.freetemporary(p_tmpclob);    
+  end export2json;
 
   --------------------- PUBLIC -------------------------
 
@@ -1244,8 +1748,61 @@ create or replace package body EXPORT is
   begin     
     dbms_lob.createtemporary(p_outlob, true);   
     export2xls(p_cursor, p_outlob, p_compress);  
-  end export2xls; 
+  end export2xls;  
+
+  procedure export2json(p_query    clob,
+                        p_dir      varchar2,
+                        p_file     varchar2, 
+                        p_bom      boolean default true,
+                        p_compress boolean default false) 
+  as   
+    p_cursor   number; 
+    p_filename varchar2(1000) := p_file || case when p_compress then '.gz' end;
+    p_cnt      pls_integer;
+  begin    
+    p_cursor := dbms_sql.open_cursor; 
+    dbms_sql.parse(p_cursor, p_query, dbms_sql.native);
+    p_cnt := dbms_sql.execute(p_cursor); 
+    
+    export2json(p_cursor, p_dir, p_filename, p_bom, p_compress); 
+  end export2json; 
+ 
+  procedure export2json(p_refcursor in out sys_refcursor,
+                        p_dir       varchar2,
+                        p_file      varchar2, 
+                        p_bom       boolean default true,
+                        p_compress  boolean default false) 
+  as   
+    p_cursor   number := dbms_sql.to_cursor_number(p_refcursor);  
+    p_filename varchar2(1000) := p_file || case when p_compress then '.gz' end; 
+  begin     
+    export2json(p_cursor, p_dir, p_filename, p_bom, p_compress);  
+  end export2json; 
+  
+  procedure export2json(p_query    clob,
+                        p_outlob   out blob,  
+                        p_bom      boolean default true,
+                        p_compress boolean default false) 
+  as   
+    p_cursor number := dbms_sql.open_cursor;      
+    p_cnt    number;     
+  begin     
+    dbms_lob.createtemporary(p_outlob, true);   
+    dbms_sql.parse(p_cursor, p_query, dbms_sql.native); 
+    p_cnt := dbms_sql.execute(p_cursor);    
+    export2json(p_cursor, p_outlob, p_bom, p_compress);  
+  end export2json; 
+
+  procedure export2json(p_refcursor in out sys_refcursor,
+                        p_outlob    out blob,  
+                        p_bom       boolean default true,
+                        p_compress  boolean default false) 
+  as   
+    p_cursor number := dbms_sql.to_cursor_number(p_refcursor);   
+  begin     
+    dbms_lob.createtemporary(p_outlob, true);   
+    export2json(p_cursor, p_outlob, p_bom, p_compress);  
+  end export2json; 
 
 end EXPORT;
 /
-
